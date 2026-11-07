@@ -1,0 +1,8 @@
+# Files in the project root that should not be published to the site
+.git
+.gitignore
+.wrangler
+node_modules
+wrangler.jsonc
+README.md
+.DS_Store

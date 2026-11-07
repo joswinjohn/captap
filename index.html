@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>CapTap</title>
+  <meta name="description" content="Find the world's capital cities on a satellite globe.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 26 36%22%3E%3Cpath d=%22M13 35S2 21.5 2 13a11 11 0 0 1 22 0c0 8.5-11 22-11 22Z%22 fill=%22%23ffc83d%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="globe" aria-label="Satellite globe. Drag to spin, scroll to zoom, click to drop a pin."></div>
+
+  <!-- In-game HUD -->
+  <header id="hud" hidden>
+    <button class="wordmark" id="menuBtn" title="Back to menu">CapTap</button>
+    <div class="hud-stats">
+      <div class="stat"><span class="stat-value" id="roundLabel">1 / 7</span><span class="stat-label" id="roundWord">capital</span></div>
+      <div class="stat"><span class="stat-value" id="scoreLabel">0</span><span class="stat-label">points</span></div>
+    </div>
+  </header>
+
+  <section id="board" hidden aria-live="polite">
+    <div class="flap" id="cityFlap"></div>
+    <p class="country" id="countryLabel"></p>
+  </section>
+
+  <footer id="dock" hidden>
+    <div id="result" hidden>
+      <span class="result-points" id="resultPoints">0</span>
+      <span class="result-detail"><span id="resultPointsWord">points</span><br><span id="resultDistance"></span></span>
+    </div>
+    <div class="dock-actions">
+      <button class="btn btn-primary" id="actionBtn" disabled>Click the globe to drop a pin</button>
+      <button class="btn btn-quiet" id="finishBtn" hidden>End game</button>
+    </div>
+  </footer>
+
+  <!-- Start screen -->
+  <section class="overlay" id="start">
+    <div class="panel panel-start">
+      <div class="flap flap-title" id="titleFlap"></div>
+      <p class="lede">Pick capitals or countries. We name one, you find it on the globe. A pin within 50&nbsp;km of the target earns 100 points, and the further off you land, the fewer you get.</p>
+      <div class="kind" role="radiogroup" aria-label="What to find">
+        <label><input type="radio" name="kind" value="capitals" checked><span>Capitals</span></label>
+        <label><input type="radio" name="kind" value="countries"><span>Countries</span></label>
+      </div>
+      <div class="modes">
+        <button class="mode" data-mode="quick">
+          <span class="mode-name" id="quickName">Seven capitals</span>
+          <span class="mode-desc" id="quickDesc">Today's 7 capitals, the same for everyone. Out of 700 points.</span>
+          <span class="mode-best" id="bestQuick"></span>
+        </button>
+        <button class="mode" data-mode="all">
+          <span class="mode-name" id="allName">Every capital</span>
+          <span class="mode-desc">All <span id="capCount">194</span>, in random order. End whenever you like.</span>
+          <span class="mode-best" id="bestAll"></span>
+        </button>
+      </div>
+      <div class="start-foot">
+        <label class="toggle">
+          <input type="checkbox" id="hdToggle">
+          <span class="toggle-track" aria-hidden="true"></span>
+          <span>Sharper imagery when zoomed in <span class="muted">(streams map tiles)</span></span>
+        </label>
+        <p class="muted hint">Drag to spin. Scroll or pinch to zoom.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- End screen -->
+  <section class="overlay" id="end" hidden>
+    <div class="panel panel-end">
+      <p class="end-kicker" id="endKicker">Final score</p>
+      <p class="end-score"><span id="endScore">0</span><span class="end-max" id="endMax">/ 700</span></p>
+      <p class="end-summary" id="endSummary"></p>
+      <div class="arrivals" role="table" aria-label="Your guesses">
+        <div class="arr-row arr-head" role="row">
+          <span role="columnheader" id="colName">Capital</span>
+          <span role="columnheader" class="num">Off by</span>
+          <span role="columnheader" class="num">Points</span>
+        </div>
+        <div class="arr-body" id="arrivals"></div>
+      </div>
+      <div class="end-actions">
+        <button class="btn btn-primary" id="againBtn">Play again</button>
+        <button class="btn btn-quiet" id="modesBtn">Change mode</button>
+      </div>
+    </div>
+  </section>
+
+  <p class="credit" id="credit"></p>
+
+  <script src="vendor/globe.gl.min.js"></script>
+  <script src="capitals.js"></script>
+  <script src="countries.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

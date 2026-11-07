@@ -1,0 +1,9 @@
+// Cloudflare Worker that serves CapTap's static files (no server code needed).
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "captap",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./"
+  }
+}
