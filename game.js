@@ -9,8 +9,6 @@
   const TEXTURE_CDN = "https://cdn.jsdelivr.net/npm/three-globe@2.45.0/example/img/";
   const TILE_URL = (x, y, l) =>
     `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${l}/${y}/${x}`;
-  const TILE_CREDIT = "Imagery © Esri, Maxar, Earthstar Geographics";
-  const BASE_CREDIT = "Imagery: NASA Blue Marble";
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // WebGL refuses textures from file:// pages, so fall back to the CDN copy there.
@@ -228,8 +226,6 @@
 
   // ---------- globe ----------
   const globe = new Globe($("globe"), { animateIn: true })
-    .globeImageUrl(tex("earth-blue-marble.jpg"))
-    .bumpImageUrl(tex("earth-topology.png"))
     .backgroundImageUrl(tex("night-sky.png"))
     .showAtmosphere(true)
     .atmosphereColor("#8fc6ff")
@@ -324,15 +320,121 @@
     return el;
   }
 
-  // ---------- imagery toggle ----------
-  function setHd(on) {
-    globe.globeTileEngineUrl(on ? TILE_URL : null);
-    $("credit").textContent = on ? TILE_CREDIT : BASE_CREDIT;
-    store.set("hd", on);
+  // ---------- imagery: streamed Esri tiles ----------
+  // The tile engine uses level L once camera altitude (in globe radii) drops
+  // below thresholds[L], which default to 8 / 2^L. That's calibrated for a
+  // viewport ~300 device pixels tall, so on a real (especially retina) screen
+  // the zoomed-out view gets tiles 4-8x coarser than the pixels they cover.
+  //
+  // Instead, derive the thresholds from the screen. At altitude a, the surface
+  // point nearest the camera is a radii away, so one radius spans
+  // H / (2 tan(fov/2) a) device pixels and the world's circumference spans 2π
+  // times that. Level L is 256 * 2^L pixels around, so it's sharp enough once
+  //   a >= 2π H q / (2 tan(fov/2) * 256 * 2^L)
+  // where q is the tile-texel to screen-pixel ratio we're happy with.
+  // TILE_SHARPNESS = 1 means fully crisp at the center of the view; each step
+  // of 2x sharpness costs ~4x the tile requests.
+  const TILE_SHARPNESS = 0.6;
+  // globe.gl adds its globe to the scene in a deferred update, not when the
+  // Globe is constructed, so the engine may not be findable yet: retry per frame.
+  let tileEngine = null;
+  let tileEngineSearches = 0;
+  let tileEngineRetry = 0;
+  function tuneTileEngine() {
+    if (!tileEngine) {
+      cancelAnimationFrame(tileEngineRetry);
+      globe.scene().traverse((o) => {
+        if (!tileEngine && Array.isArray(o.thresholds) && "minLevel" in o) tileEngine = o;
+      });
+      if (!tileEngine) {
+        if (++tileEngineSearches < 300) tileEngineRetry = requestAnimationFrame(tuneTileEngine);
+        else console.warn("CapTap: tile engine not found; using default tile levels");
+        return;
+      }
+    }
+    if (!tileEngine.__horizonCulled) cullTilesAtHorizon(tileEngine);
+    const cam = globe.camera();
+    const screenH = window.innerHeight * globe.renderer().getPixelRatio();
+    const k = (2 * Math.PI * screenH * TILE_SHARPNESS) / (2 * Math.tan((cam.fov * Math.PI) / 360) * 256);
+    tileEngine.thresholds = tileEngine.thresholds.map((_, level) => k / 2 ** level);
+    tileEngine.updatePov(cam);
   }
-  $("hdToggle").checked = !!store.get("hd");
-  setHd($("hdToggle").checked);
-  $("hdToggle").addEventListener("change", (e) => setHd(e.target.checked));
+
+  // Two fixes to how the engine requests tiles, both done by wrapping updatePov
+  // (globe.gl calls it on every camera change). Tile requests can't be
+  // cancelled, so anything wasted queues ahead of the tiles you're looking at.
+  //
+  // 1. It only checks tiles against the camera frustum, so it also downloads the
+  //    far side of the globe. The camera always looks at the globe's center, so
+  //    the far side is exactly what lies past the plane of the horizon circle, at
+  //    depth D - R²/D: hand the engine a copy of the camera with its far plane there.
+  // 2. A single scroll can sweep through several levels, and each one would
+  //    request a screenful of tiles on the way. Only switch to a new level once
+  //    the zoom has stayed within it briefly. (Timing from the last camera change
+  //    instead would never fire while the globe auto-rotates.)
+  const LEVEL_SETTLE_MS = 200;
+  function cullTilesAtHorizon(engine) {
+    const update = engine.updatePov.bind(engine);
+    let proxy = null;
+    let center = null;
+    let scale = null;
+    let far = Infinity;
+    let pending = 0;
+    let wanted = -1;
+    engine.updatePov = (cam) => {
+      if (!cam || !cam.isPerspectiveCamera) return update(cam);
+      if (cam !== proxy) {
+        far = cam.far;
+        proxy = proxy ? proxy.copy(cam) : cam.clone();
+        center ||= proxy.position.clone();
+        scale ||= proxy.position.clone();
+      }
+      engine.getWorldPosition(center);
+      engine.getWorldScale(scale);
+      // globe.gl grows the scene in from near-zero scale; at that size every tile
+      // passes the horizon test, so wait for full size before requesting any.
+      if (scale.x < 0.999) {
+        clearTimeout(pending);
+        wanted = -1;
+        pending = setTimeout(() => engine.updatePov(proxy), 100);
+        return;
+      }
+      const r = globe.getGlobeRadius() * scale.x;
+      const d = proxy.position.distanceTo(center);
+      // A little slack keeps tiles that straddle the horizon.
+      proxy.far = d > r ? Math.min(far, d - (r * r) / d + 0.02 * r) : far;
+      proxy.updateProjectionMatrix();
+
+      // Same level pick as the engine: altitude in radii against the thresholds.
+      const alt = d / r - 1;
+      const i = engine.thresholds.findIndex((t) => t && t <= alt);
+      const level = Math.min(engine.maxLevel, Math.max(engine.minLevel, i < 0 ? engine.thresholds.length : i));
+      lastAlt = alt;
+      if (level === engine.level) {
+        clearTimeout(pending);
+        wanted = -1;
+        update(proxy);
+      } else if (level !== wanted) {
+        clearTimeout(pending);
+        wanted = level;
+        settleLevel(lastAlt);
+      }
+    };
+    // Fire once altitude has stopped changing (by more than 3%) for a moment.
+    let lastAlt = 0;
+    function settleLevel(fromAlt) {
+      pending = setTimeout(() => {
+        if (Math.abs(lastAlt / fromAlt - 1) > 0.03) return settleLevel(lastAlt);
+        wanted = -1;
+        update(proxy);
+      }, LEVEL_SETTLE_MS);
+    }
+    engine.__horizonCulled = true;
+  }
+  window.addEventListener("resize", tuneTileEngine);
+
+  tuneTileEngine();
+  globe.globeTileEngineUrl(TILE_URL);
 
   // ---------- game state ----------
   const KINDS = {
@@ -388,13 +490,24 @@
     $("quickName").textContent = "Daily seven";
     $("quickDesc").textContent = `Today's 7 ${k.many}, the same for everyone. Out of 700 points.`;
     $("allName").textContent = `Every ${k.one}`;
-    $("bestQuick").textContent = today && today.day === todayKey() ? `Your score today: ${today.total} / ${QUICK_ROUNDS * 100}` : "";
+    $("bestQuick").textContent = today && today.day === todayKey() ? `Done for today: ${today.total} / ${QUICK_ROUNDS * 100}. See your results` : "";
     $("bestAll").textContent = a ? `Your best: ${a.total.toLocaleString()} from ${a.played} ${a.played === 1 ? k.one : k.many}` : "";
     $("capCount").textContent = CAPITALS.length;
     document.querySelector(`.kind input[value="${state.kind}"]`).checked = true;
   }
 
+  // Today's finished daily run for the current kind, if there is one.
+  function todaysDaily() {
+    const rec = store.get(`today-${state.kind}`);
+    return rec && rec.day === todayKey() ? rec : null;
+  }
+
   function startGame(mode) {
+    // The daily seven is one attempt per day: once finished, show those results.
+    if (mode === "quick") {
+      const done = todaysDaily();
+      if (done) return showDailyResults(done);
+    }
     const k = KINDS[state.kind];
     $("roundWord").textContent = k.one;
     $("colName").textContent = k.column;
@@ -510,45 +623,78 @@
 
   function finish() {
     if (state.phase === "guess" && state.results.length === 0) return goMenu();
+
+    if (state.mode === "quick") {
+      // Save the run, with its rows, so it can be shown again instead of replayed.
+      // If another tab already finished today's set, that first run stands.
+      const prev = store.get(`today-${state.kind}`);
+      if (prev && prev.day === state.day) return showDailyResults(prev);
+      const results = state.results.map(({ capital, country, km, points }) => ({ capital, country, km, points }));
+      store.set(`today-${state.kind}`, { day: state.day, total: state.total, results });
+      return showEnd(dailyKicker(state.day));
+    }
+
+    const key = KINDS[state.kind].bestKey(state.mode);
+    const prev = store.get(key);
+    const isBest = !!prev && state.total > prev.total;
+    if (!prev || state.total > prev.total) store.set(key, { total: state.total, played: state.results.length });
+    showEnd(isBest ? "New best score" : "Final score");
+  }
+
+  function dailyKicker(day) {
+    const date = new Date(day + "T12:00").toLocaleDateString(undefined, { month: "long", day: "numeric" });
+    return `Your score for ${date}`;
+  }
+
+  // Straight from the menu to the end screen for a daily run already played.
+  function showDailyResults(rec) {
+    state.mode = "quick";
+    state.day = rec.day;
+    state.total = rec.total;
+    // Runs saved before rows were stored only have the total.
+    state.results = Array.isArray(rec.results) ? rec.results : [];
+    $("colName").textContent = KINDS[state.kind].column;
+    document.body.classList.remove("is-menu");
+    show(ui.start, false);
+    showEnd(dailyKicker(rec.day));
+  }
+
+  function showEnd(kicker) {
     state.phase = "end";
     flapTimers.forEach(clearInterval);
     [ui.hud, ui.board, ui.dock].forEach((el) => show(el, false));
     clearMarks();
 
+    const daily = state.mode === "quick";
     const played = state.results.length;
-    const max = played * 100;
+    const max = daily ? QUICK_ROUNDS * 100 : played * 100;
+    $("endKicker").textContent = kicker;
     $("endScore").textContent = state.total.toLocaleString();
     $("endMax").textContent = `/ ${max.toLocaleString()}`;
 
     const k = KINDS[state.kind];
-    const avgKm = state.results.reduce((s, r) => s + r.km, 0) / played;
-    const perfect = state.results.filter((r) => r.points === 100).length;
-    let summary;
-    if (state.kind === "capitals") {
-      const best = state.results.reduce((a, b) => (b.km < a.km ? b : a));
-      summary = `Average miss ${fmtKm(avgKm)}. Closest was ${best.capital}, ${fmtKm(best.km)} off.`;
-      if (perfect) summary += ` ${plural(perfect, "perfect pin")}.`;
-    } else {
-      const inside = state.results.filter((r) => r.km === 0).length;
-      summary = `${inside} of ${played} pins landed inside the country. Average miss ${fmtKm(avgKm)}.`;
+    let summary = "";
+    if (played) {
+      const avgKm = state.results.reduce((s, r) => s + r.km, 0) / played;
+      const perfect = state.results.filter((r) => r.points === 100).length;
+      if (state.kind === "capitals") {
+        const best = state.results.reduce((a, b) => (b.km < a.km ? b : a));
+        summary = `Average miss ${fmtKm(avgKm)}. Closest was ${best.capital}, ${fmtKm(best.km)} off.`;
+        if (perfect) summary += ` ${plural(perfect, "perfect pin")}.`;
+      } else {
+        const inside = state.results.filter((r) => r.km === 0).length;
+        summary = `${inside} of ${played} pins landed inside the country. Average miss ${fmtKm(avgKm)}.`;
+      }
     }
     if (state.mode === "all" && played < state.queue.length) summary = `${played} of ${state.queue.length} ${k.many}. ` + summary;
+    if (daily) summary = (summary + " A new set unlocks at midnight.").trim();
     $("endSummary").textContent = summary;
 
-    if (state.mode === "quick") {
-      // The first finished run of the day is "today's score"; replays don't overwrite it.
-      const prev = store.get(`today-${state.kind}`);
-      const first = !prev || prev.day !== state.day;
-      if (first) store.set(`today-${state.kind}`, { day: state.day, total: state.total });
-      const date = new Date(state.day + "T12:00").toLocaleDateString(undefined, { month: "long", day: "numeric" });
-      $("endKicker").textContent = first ? `Your score for ${date}` : `Replay of ${date}. Your first score was ${prev.total}.`;
-    } else {
-      const key = k.bestKey(state.mode);
-      const prev = store.get(key);
-      const isBest = !!prev && state.total > prev.total;
-      if (!prev || state.total > prev.total) store.set(key, { total: state.total, played });
-      $("endKicker").textContent = isBest ? "New best score" : "Final score";
-    }
+    // One attempt per day: no replay button for the daily seven.
+    show($("againBtn"), !daily);
+    $("modesBtn").classList.toggle("btn-primary", daily);
+    $("modesBtn").classList.toggle("btn-quiet", !daily);
+    show(document.querySelector(".arrivals"), played > 0);
 
     const body = $("arrivals");
     body.innerHTML = "";
@@ -575,7 +721,7 @@
 
     controls.autoRotate = !reduceMotion;
     show(ui.end, true);
-    $("againBtn").focus({ preventScroll: true });
+    $(daily ? "modesBtn" : "againBtn").focus({ preventScroll: true });
   }
 
   // ---------- wiring ----------
